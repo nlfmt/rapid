@@ -1,0 +1,44 @@
+{
+  "name": "@nlfmt/rapid",
+  "version": "1.0.0",
+  "description": "Rapidly create typesafe routes for your express application",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --dts --minify",
+    "release": "pnpm run build && changeset publish",
+    "lint": "tsc",
+    "dev": "pnpm link -g && tsup src/index.ts --watch --dts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nlfmt/rapid.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nlfmt/rapid/issues"
+  },
+  "homepage": "https://github.com/nlfmt/rapid#readme",
+  "keywords": [
+    "express",
+    "router",
+    "routing",
+    "typescript",
+    "typesafety"
+  ],
+  "author": "nlfmt <nlfmt@gmx.de>",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.1",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.16",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3"
+  }
+}
