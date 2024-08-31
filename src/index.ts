@@ -30,7 +30,7 @@ type ExtractUrlParamNames<T extends string> =
     : never
 
 /** Get object of params from url string */
-type UrlParamSchema<Path extends string> = { [K in ExtractUrlParamNames<Path>]: z.ZodSchema<string> }
+type UrlParamSchema<Path extends string> = { [K in ExtractUrlParamNames<Path>]: z.ZodSchema }
 
 type RouteSchema = {
   path: string
@@ -38,7 +38,7 @@ type RouteSchema = {
   query: z.ZodSchema
   cookies: z.ZodSchema
   params: z.ZodSchema
-  data: object | null
+  context: object | null
 }
 
 export type ErrorFunction = (error: Error) => void
@@ -55,8 +55,8 @@ export type RouteHandler<Schema extends RouteSchema> = (v: {
     : Schema["params"] extends z.ZodSchema<null>
       ? { [K in ExtractUrlParamNames<Schema["path"]>]: string }
       : z.infer<Schema["params"]>
-  ctx: Schema["data"]
-}) => void
+  ctx: Schema["context"]
+}) => Awaitable<any>
 
 type ConstrainedSchema<Keys, Schema> = {
   [K in keyof Schema]: K extends Keys ? Schema[K] : never;
@@ -72,10 +72,16 @@ type MiddlewareFunction<
   TDataNew extends object | undefined | void,
 > = (data: TData) => Awaitable<NoCommonKeys<TDataNew, TData>>
 
-type InitialContext = {
+export type InitialContext = {
   req: Request
   res: Response
 }
+
+/**
+ * Get the context after a middleware function has been applied
+ * @usage `ContextAfter<typeof middleware>`
+ */
+export type ContextAfter<T> = T extends MiddlewareFunction<infer PreviousContext, infer AddedContext> ? PreviousContext & AddedContext : never
 
 /**
  * Create a middleware function that can be used to modify the context of a route
@@ -96,15 +102,15 @@ export class RouteBuilder<
   TQuery extends z.ZodSchema = z.ZodSchema<null>,
   TCookies extends z.ZodSchema = z.ZodSchema<null>,
   TParams extends z.ZodSchema = z.ZodSchema<null>,
-  TData extends object = InitialContext,
-  Schema extends RouteSchema = { path: Path; body: TBody; query: TQuery; cookies: TCookies, params: TParams, data: TData }
+  TContext extends object = InitialContext,
+  Schema extends RouteSchema = { path: Path; body: TBody; query: TQuery; cookies: TCookies, params: TParams, context: TContext }
 > {
   public router: Router
   private bodySchema?: TBody
   private querySchema?: TQuery
   private cookieSchema?: TCookies
   private paramSchema?: TParams
-  private middleware: MiddlewareFunction<TData, TData>[] = []
+  private middleware: MiddlewareFunction<TContext, TContext>[] = []
   private path: Path
 
   constructor(router: Router, path: Path, opts?: { body?: TBody; cookies?: TCookies; query?: TQuery }) {
@@ -120,9 +126,9 @@ export class RouteBuilder<
    * - Data returned from this function will be merged into the context
    * - use `throw new ApiError(...)` to send an error response and stop the route
    */
-  use<TDataNew extends object | undefined | void>(middleware: MiddlewareFunction<TData, TDataNew>) {
-    this.middleware.push(middleware as unknown as MiddlewareFunction<TData, TData>)
-    return this as unknown as RouteBuilder<Path, TBody, TQuery, TCookies, TParams, Flatten<Overwrite<TData, TDataNew>>>
+  use<TNewData extends object | undefined | void>(middleware: MiddlewareFunction<TContext, TNewData>) {
+    this.middleware.push(middleware as unknown as MiddlewareFunction<TContext, TContext>)
+    return this as unknown as RouteBuilder<Path, TBody, TQuery, TCookies, TParams, Flatten<Overwrite<TContext, TNewData>>>
   }
 
   /**
@@ -131,7 +137,7 @@ export class RouteBuilder<
    */
   body<BodySchema extends z.ZodSchema>(schema: BodySchema) {
     this.bodySchema = schema as unknown as TBody
-    return this as unknown as RouteBuilder<Path, BodySchema, TQuery, TCookies, TParams, TData>
+    return this as unknown as RouteBuilder<Path, BodySchema, TQuery, TCookies, TParams, TContext>
   }
 
   /**
@@ -140,7 +146,7 @@ export class RouteBuilder<
    */
   query<QuerySchema extends z.ZodSchema>(schema: QuerySchema) {
     this.querySchema = schema as unknown as TQuery
-    return this as unknown as RouteBuilder<Path, TBody, QuerySchema, TCookies, TParams, TData>
+    return this as unknown as RouteBuilder<Path, TBody, QuerySchema, TCookies, TParams, TContext>
   }
 
   /**
@@ -150,7 +156,7 @@ export class RouteBuilder<
   params<ParamSchema extends UrlParamSchema<Path>>(schema: ConstrainedSchema<ExtractUrlParamNames<Path>, ParamSchema>) {
     const zodSchema = z.object(schema)
     this.paramSchema = zodSchema as unknown as TParams
-    return this as unknown as RouteBuilder<Path, TBody, TQuery, TCookies, typeof zodSchema, TData>
+    return this as unknown as RouteBuilder<Path, TBody, TQuery, TCookies, typeof zodSchema, TContext>
   }
 
   /**
@@ -159,7 +165,7 @@ export class RouteBuilder<
    */
   cookies<CookiesSchema extends z.ZodSchema>(schema: CookiesSchema) {
     this.cookieSchema = schema as unknown as TCookies
-    return this as unknown as RouteBuilder<Path, TBody, TQuery, CookiesSchema, TParams, TData>
+    return this as unknown as RouteBuilder<Path, TBody, TQuery, CookiesSchema, TParams, TContext>
   }
 
   /**
@@ -184,7 +190,7 @@ export class RouteBuilder<
       QuerySchema,
       CookiesSchema,
       TParams,
-      TData
+      TContext
     >
   }
 
@@ -233,23 +239,31 @@ export class RouteBuilder<
         data.cookies = cookies.data
       }
 
-      let middlewareData = { req, res } as unknown as TData
+      let context = { req, res } as unknown as TContext
       
       try {
         for (const middleware of this.middleware) {
-          const newData = await middleware(middlewareData)
+          const newData = await middleware(context)
           if (typeof newData === "object") {
-            middlewareData = { ...middlewareData, ...newData }
+            context = { ...context, ...newData }
           }
         }
 
-        handler({
+        const handlerRes = await handler({
           body: data.body,
           cookies: data.cookies,
           query: data.query,
           params: data.params as unknown as z.infer<Schema["params"]>,
-          ctx: middlewareData as TData,
+          ctx: context as TContext,
         })
+
+        if (handlerRes !== undefined) {
+          if (res.writableEnded)
+            console.warn("[Rapid] :: Warning: Response already sent, data returned by handler will not be sent")
+          else
+            res.send(handlerRes)
+        }
+        
       } catch (err) {
         if (err instanceof ApiError) {
           return error(err)
@@ -308,7 +322,9 @@ export class RouteBuilder<
   }
 }
 
-
+/**
+ * Create a new rapid router
+ */
 export function createRouter() {
   const router: Router = Router()
 

@@ -1,18 +1,32 @@
 import { z } from "zod"
-import { createRouter } from "../src/index"
 import express from "express"
+import { createRouter } from "../src/index"
 
+
+// create a router for "test", usually this would be in a different file
 const testRouter = createRouter()
 
+
+// define a simple route for a GET request to /api/test
 testRouter
   .path("")
-  .use(ctx => {
-    return { a: 5 }
-  })
-  .get(({ ctx }) => {
-    ctx.res.send("Hello, World!")
+  .get(() => {
+    // you can either use the return statement, or manually use
+    // express' Response object, which allows more configuration (status code, streaming, sending files, ...)
+    return "Hello, World!"
   })
 
+
+// Code to test the route defined above
+async function test1() {
+  const res = await fetch("http://localhost:3000/api/test")
+  const data = await res.text()
+  console.log("Test 1:", data, "\nstatus code:", res.status)
+}
+
+
+// define a route for a POST request to /api/test/route1
+// define the shape of the request body to be a json object
 testRouter
   .path("/route1")
   .body(
@@ -30,18 +44,7 @@ testRouter
     })
   })
 
-const apiRouter = createRouter()
-apiRouter.subroute("/test", testRouter)
-
-const app = express()
-app.use(express.json())
-
-app.use("/api", apiRouter.router)
-
-app.listen(3000, async () => {
-  console.log("Server started on port 3000")
-
-  // Test the /api/test route
+async function test2() {
   const res = await fetch("http://localhost:3000/api/test/route1", {
     method: "POST",
     headers: {
@@ -53,5 +56,27 @@ app.listen(3000, async () => {
     }),
   }).then(res => res.json())
 
-  console.log("response:", res)
+  console.log("Test 2:", res)
+}
+
+
+// define an api router that can be mounted under /api
+// then add all other routers as subrouters, so /api/test/route1 is the resulting
+const apiRouter = createRouter()
+apiRouter.subroute("/test", testRouter)
+
+
+// create express app and make it use the api router
+const app = express()
+app.use(express.json())
+app.use("/api", apiRouter.router)
+
+
+app.listen(3000, async () => {
+  console.log("Server started on port 3000")
+
+  await test1()
+  await test2()
+
+  process.exit(0)
 })

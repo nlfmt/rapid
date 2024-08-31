@@ -1,6 +1,6 @@
 {
   "name": "@nlfmt/rapid",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Rapidly create typesafe routes for your express application",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
