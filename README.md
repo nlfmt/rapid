@@ -4,7 +4,7 @@ Rapidly create typesafe routes for your express application.
 # Installation
 Just add the package `@nlfmt/rapid` using your favorite package manager
 ```sh
-    pnpm add @nlfmt/rapid
+pnpm add @nlfmt/rapid
 ```
 
 ## Features
@@ -18,44 +18,44 @@ They can build on top of each other easily and are fully typesafe.
 
 ## Examples
 ```ts
-    import { createRouter } from "@nlfmt/rapid"
-    import express from "express"
-    import z from "zod"
+import { createRouter } from "@nlfmt/rapid"
+import express from "express"
+import z from "zod"
 
-    apiRouter
-      .path("/user/:userId")
-      .params({
-        // rapid automatically infers the param names from the url
-        userId: z.string().min(1),
+apiRouter
+  .path("/user/:userId")
+  .params({
+    // rapid automatically infers the param names from the url
+    userId: z.string().min(1),
+  })
+  .body(
+    z.object({
+      username: z.string().regex(
+        /^[a-zA-Z1-9_.]{3,}$/g,
+        "Username can only contain letters, underscores and dots"
+      ),
+      password: z.string().min(6)
+    })
+  )
+  // rapid performs the input validation for you
+  // and types `body`, `params` and more accordingly
+  .put(({ body, params }) => {
+    const user = db.user.findById(params.userId)
+    if (!user)
+      throw new ApiError({
+        code: 404,
+        name: "NOT_FOUND",
+        message: "User not found",
       })
-      .body(
-        z.object({
-          username: z.string().regex(
-            /^[a-zA-Z1-9_.]{3,}$/g,
-            "Username can only contain letters, underscores and dots"
-          ),
-          password: z.string().min(6)
-        })
-      )
-      // rapid performs the input validation for you
-      // and types `body`, `params` and more accordingly
-      .put(({ body, params }) => {
-        const user = db.user.findById(params.userId)
-        if (!user)
-          throw new ApiError({
-            code: 404,
-            name: "NOT_FOUND",
-            message: "User not found",
-          })
         
-        return db.user.updateById(params.userId, body)
-      })
+    return db.user.updateById(params.userId, body)
+  })
 
-    const app = express()
-    app.use(express.json())
-    app.use("/api", apiRouter.router)
+const app = express()
+app.use(express.json())
+app.use("/api", apiRouter.router)
 
-    app.listen(3000)
+app.listen(3000)
 ```
 For more examples, check out the [examples](examples) directory.
 
