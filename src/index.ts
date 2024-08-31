@@ -14,7 +14,6 @@ type HttpMethod =
   | "options"
   | "head"
 
-
 export type Overwrite<TType extends object, TWith> = undefined extends TWith
   ? TType & Partial<NonNullable<TWith>>
   : TType & NonNullable<TWith>
@@ -30,7 +29,9 @@ type ExtractUrlParamNames<T extends string> =
     : never
 
 /** Get object of params from url string */
-type UrlParamSchema<Path extends string> = { [K in ExtractUrlParamNames<Path>]: z.ZodSchema }
+type UrlParamSchema<Path extends string> = {
+  [K in ExtractUrlParamNames<Path>]: z.ZodSchema
+}
 
 type RouteSchema = {
   path: string
@@ -53,23 +54,25 @@ export type RouteHandler<Schema extends RouteSchema> = (v: {
   params: ExtractUrlParamNames<Schema["path"]> extends never
     ? null
     : Schema["params"] extends z.ZodSchema<null>
-      ? { [K in ExtractUrlParamNames<Schema["path"]>]: string }
-      : z.infer<Schema["params"]>
+    ? { [K in ExtractUrlParamNames<Schema["path"]>]: string }
+    : z.infer<Schema["params"]>
   ctx: Schema["context"]
 }) => Awaitable<any>
 
 type ConstrainedSchema<Keys, Schema> = {
-  [K in keyof Schema]: K extends Keys ? Schema[K] : never;
-};
+  [K in keyof Schema]: K extends Keys ? Schema[K] : never
+}
 
-type NoCommonKeys<T, U> = keyof T & keyof U extends never ? T : "Return type contains a property that is already defined by another middleware";
+type NoCommonKeys<T, U> = keyof T & keyof U extends never
+  ? T
+  : "Return type contains a property that is already defined by another middleware"
 type Awaitable<T> = T | Promise<T>
 /**
  * A middleware function that can be used to modify the context of a route
  */
 type MiddlewareFunction<
   TData extends object,
-  TDataNew extends object | undefined | void,
+  TDataNew extends object | undefined | void
 > = (data: TData) => Awaitable<NoCommonKeys<TDataNew, TData>>
 
 export type InitialContext = {
@@ -81,7 +84,12 @@ export type InitialContext = {
  * Get the context after a middleware function has been applied
  * @usage `ContextAfter<typeof middleware>`
  */
-export type ContextAfter<T> = T extends MiddlewareFunction<infer PreviousContext, infer AddedContext> ? PreviousContext & AddedContext : never
+export type ContextAfter<T> = T extends MiddlewareFunction<
+  infer PreviousContext,
+  infer AddedContext
+>
+  ? PreviousContext & AddedContext
+  : never
 
 /**
  * Create a middleware function that can be used to modify the context of a route
@@ -103,7 +111,14 @@ export class RouteBuilder<
   TCookies extends z.ZodSchema = z.ZodSchema<null>,
   TParams extends z.ZodSchema = z.ZodSchema<null>,
   TContext extends object = InitialContext,
-  Schema extends RouteSchema = { path: Path; body: TBody; query: TQuery; cookies: TCookies, params: TParams, context: TContext }
+  Schema extends RouteSchema = {
+    path: Path
+    body: TBody
+    query: TQuery
+    cookies: TCookies
+    params: TParams
+    context: TContext
+  }
 > {
   public router: Router
   private bodySchema?: TBody
@@ -113,7 +128,11 @@ export class RouteBuilder<
   private middleware: MiddlewareFunction<TContext, TContext>[] = []
   private path: Path
 
-  constructor(router: Router, path: Path, opts?: { body?: TBody; cookies?: TCookies; query?: TQuery }) {
+  constructor(
+    router: Router,
+    path: Path,
+    opts?: { body?: TBody; cookies?: TCookies; query?: TQuery }
+  ) {
     this.path = path
     this.router = router
     this.bodySchema = opts?.body
@@ -126,9 +145,20 @@ export class RouteBuilder<
    * - Data returned from this function will be merged into the context
    * - use `throw new ApiError(...)` to send an error response and stop the route
    */
-  use<TNewData extends object | undefined | void>(middleware: MiddlewareFunction<TContext, TNewData>) {
-    this.middleware.push(middleware as unknown as MiddlewareFunction<TContext, TContext>)
-    return this as unknown as RouteBuilder<Path, TBody, TQuery, TCookies, TParams, Flatten<Overwrite<TContext, TNewData>>>
+  use<TNewData extends object | undefined | void>(
+    middleware: MiddlewareFunction<TContext, TNewData>
+  ) {
+    this.middleware.push(
+      middleware as unknown as MiddlewareFunction<TContext, TContext>
+    )
+    return this as unknown as RouteBuilder<
+      Path,
+      TBody,
+      TQuery,
+      TCookies,
+      TParams,
+      Flatten<Overwrite<TContext, TNewData>>
+    >
   }
 
   /**
@@ -137,40 +167,70 @@ export class RouteBuilder<
    */
   body<BodySchema extends z.ZodSchema>(schema: BodySchema) {
     this.bodySchema = schema as unknown as TBody
-    return this as unknown as RouteBuilder<Path, BodySchema, TQuery, TCookies, TParams, TContext>
+    return this as unknown as RouteBuilder<
+      Path,
+      BodySchema,
+      TQuery,
+      TCookies,
+      TParams,
+      TContext
+    >
   }
 
   /**
    * Specify a query schema
-   * @param schema 
+   * @param schema
    */
   query<QuerySchema extends z.ZodSchema>(schema: QuerySchema) {
     this.querySchema = schema as unknown as TQuery
-    return this as unknown as RouteBuilder<Path, TBody, QuerySchema, TCookies, TParams, TContext>
+    return this as unknown as RouteBuilder<
+      Path,
+      TBody,
+      QuerySchema,
+      TCookies,
+      TParams,
+      TContext
+    >
   }
 
   /**
    * Specify a param schema
-   * @param schema 
+   * @param schema
    */
-  params<ParamSchema extends UrlParamSchema<Path>>(schema: ConstrainedSchema<ExtractUrlParamNames<Path>, ParamSchema>) {
+  params<ParamSchema extends UrlParamSchema<Path>>(
+    schema: ConstrainedSchema<ExtractUrlParamNames<Path>, ParamSchema>
+  ) {
     const zodSchema = z.object(schema)
     this.paramSchema = zodSchema as unknown as TParams
-    return this as unknown as RouteBuilder<Path, TBody, TQuery, TCookies, typeof zodSchema, TContext>
+    return this as unknown as RouteBuilder<
+      Path,
+      TBody,
+      TQuery,
+      TCookies,
+      typeof zodSchema,
+      TContext
+    >
   }
 
   /**
    * SPecify a cookie schema
-   * @param schema 
+   * @param schema
    */
   cookies<CookiesSchema extends z.ZodSchema>(schema: CookiesSchema) {
     this.cookieSchema = schema as unknown as TCookies
-    return this as unknown as RouteBuilder<Path, TBody, TQuery, CookiesSchema, TParams, TContext>
+    return this as unknown as RouteBuilder<
+      Path,
+      TBody,
+      TQuery,
+      CookiesSchema,
+      TParams,
+      TContext
+    >
   }
 
   /**
    * Specify all input schemas at once
-   * @param schema 
+   * @param schema
    */
   input<
     BodySchema extends z.ZodSchema = z.ZodSchema<null>,
@@ -207,40 +267,56 @@ export class RouteBuilder<
         params: null,
       }
 
-      if(this.paramSchema) {
+      if (this.paramSchema) {
         const params = this.paramSchema.safeParse(req.params)
         if (!params.success)
-          return error({ code: 400, name: "BAD_REQUEST", message: "Invalid Parameters", cause: params.error.flatten() })
+          return error({
+            code: 400,
+            name: "BAD_REQUEST",
+            message: "Invalid Parameters",
+            cause: params.error.flatten(),
+          })
         data.params = params.data
       }
 
       if (this.bodySchema) {
         const body = this.bodySchema.safeParse(req.body)
         if (!body.success)
-          return error({ code: 400, name: "BAD_REQUEST", message: "Invalid Body", cause: body.error.flatten() })
+          return error({
+            code: 400,
+            name: "BAD_REQUEST",
+            message: "Invalid Body",
+            cause: body.error.flatten(),
+          })
         data.body = body.data
       }
 
       if (this.querySchema) {
         const queryParams = this.querySchema.safeParse(req.query)
         if (!queryParams.success)
-          return res
-            .status(400)
-            .json({ code: 400, name: "BAD_REQUEST", message: "Invalid Query Params", cause: queryParams.error.flatten() })
+          return res.status(400).json({
+            code: 400,
+            name: "BAD_REQUEST",
+            message: "Invalid Query Params",
+            cause: queryParams.error.flatten(),
+          })
         data.query = queryParams.data
       }
 
       if (this.cookieSchema) {
         const cookies = this.cookieSchema.safeParse(req.cookies)
         if (!cookies.success)
-          return res
-            .status(400)
-            .json({ code: 400, name: "BAD_REQUEST", message: "Invalid Cookies", cause: cookies.error.flatten() })
+          return res.status(400).json({
+            code: 400,
+            name: "BAD_REQUEST",
+            message: "Invalid Cookies",
+            cause: cookies.error.flatten(),
+          })
         data.cookies = cookies.data
       }
 
       let context = { req, res } as unknown as TContext
-      
+
       try {
         for (const middleware of this.middleware) {
           const newData = await middleware(context)
@@ -259,11 +335,15 @@ export class RouteBuilder<
 
         if (handlerRes !== undefined) {
           if (res.writableEnded)
-            console.warn("[Rapid] :: Warning: Response already sent, data returned by handler will not be sent")
-          else
-            res.send(handlerRes)
+            console.warn(
+              "[Rapid] :: Warning: Response already sent, data returned by handler will not be sent"
+            )
+          else res.send(handlerRes)
+        } else if (!res.writableEnded) {
+          console.warn(
+            "[Rapid] :: Warning: Handler did not send a response and didn't return data to send"
+          )
         }
-        
       } catch (err) {
         if (err instanceof ApiError) {
           return error(err)
@@ -313,7 +393,10 @@ export class RouteBuilder<
 
   subroute(router: RouteBuilder<string>): void
   subroute(path: string, router: RouteBuilder<string>): void
-  subroute(pathOrRouter: string | RouteBuilder<string>, router?: RouteBuilder<string>) {
+  subroute(
+    pathOrRouter: string | RouteBuilder<string>,
+    router?: RouteBuilder<string>
+  ) {
     if (typeof pathOrRouter === "string") {
       this.router.use(pathOrRouter, router!.router)
     } else {
@@ -335,6 +418,6 @@ export function createRouter() {
     },
     subroute(path: string, routeBuilder: { router: Router }) {
       router.use(path, routeBuilder.router)
-    }
+    },
   }
 }

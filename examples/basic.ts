@@ -38,10 +38,10 @@ testRouter
   .post(({ ctx, body }) => {
     console.log("request to /route1 with body:", body)
 
-    ctx.res.send({
+    return {
       greeting: `Hello, ${body.some_prop}!`,
       result: body.another_prop * 2,
-    })
+    }
   })
 
 async function test2() {

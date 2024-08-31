@@ -1,4 +1,9 @@
-export type Error = { name: string; code: number; message?: string, cause?: any }
+export type Error = {
+  name: string
+  code: number
+  message?: string
+  cause?: any
+}
 export class ApiError {
   public name: string
   public code: number
@@ -14,7 +19,9 @@ export class ApiError {
 }
 
 type Errors<T> = { [k in keyof T]: Error }
-type ErrorsIn<Keys extends string> = { [K in Keys]: [code: number, message: string] }
+type ErrorsIn<Keys extends string> = {
+  [K in Keys]: [code: number, message: string]
+}
 
 /**
  * Creates an object of errors

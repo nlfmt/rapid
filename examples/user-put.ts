@@ -66,4 +66,6 @@ app.listen(3000, async () => {
     })
   }).then(res => res.json())
   console.log(res)
+
+  process.exit(0)
 })
