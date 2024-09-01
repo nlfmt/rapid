@@ -18,9 +18,11 @@ They can build on top of each other easily and are fully typesafe.
 
 ## Examples
 ```ts
-import { createRouter } from "@nlfmt/rapid"
+import { createRouter, ApiError } from "@nlfmt/rapid"
 import express from "express"
 import z from "zod"
+
+const apiRouter = createRouter()
 
 apiRouter
   .path("/user/:userId")
@@ -58,6 +60,9 @@ app.use("/api", apiRouter.router)
 app.listen(3000)
 ```
 For more examples, check out the [examples](examples) directory.
+
+## Contributing
+Take a look at the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information.
 
 
 ## License
