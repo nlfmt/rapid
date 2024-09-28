@@ -11,7 +11,7 @@
     "build": "tsup src/index.ts --dts --minify",
     "release": "pnpm run build && changeset publish",
     "lint": "tsc",
-    "dev": "pnpm link -g && tsup src/index.ts --watch --dts"
+    "dev": "pnpm link -g && pnpm link -g @nlfmt/rapid && tsup src/index.ts --watch --dts"
   },
   "repository": {
     "type": "git",

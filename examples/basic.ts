@@ -1,6 +1,6 @@
 import { z } from "zod"
 import express from "express"
-import { createRouter } from "../src/index"
+import { createRouter } from "@nlfmt/rapid"
 
 
 // create a router for "test", usually this would be in a different file
