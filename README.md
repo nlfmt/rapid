@@ -67,3 +67,31 @@ Take a look at the [CONTRIBUTING.md](CONTRIBUTING.md) file for more information.
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+
+
+```ts
+const app = new Rapid()
+  .path("/user", {
+    body: z.object({
+      username: z.string().min(3),
+      password: z.string().min(6)
+    })
+  })
+  .get(({ body }) => {
+    return db.user.create(body)
+  })
+
+  .path("/user/:userId")
+  .validate({
+    params: z.object({
+      userId: z.string().min(1)
+    })
+  })
+  .get(({ params }) => {
+    return db.user.findById(params.userId)
+  })
+  .put(({ params, body }) => {
+    return db.user.updateById(params.userId, body)
+  })
+```ts

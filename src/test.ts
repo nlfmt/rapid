@@ -2,13 +2,9 @@ import { z } from "zod";
 import { Rapid } from "./route-builder";
 
 const app = new Rapid()
-    .path("/test")
-    .params(z.object({
-        id: z.number()
-    }))
-    .all(c => {
+    .get("/", { body: z.object({ hi: z.string() }) }, c => {
         return {
-            test: "abc"
+            hi: "there"
         }
     })
     
