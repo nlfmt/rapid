@@ -1,16 +1,18 @@
-export type Error = {
+import type { Response } from 'express'
+
+export type RapidErrorDef = {
   name: string
   code: number
   message?: string
   cause?: any
 }
-export class ApiError {
+export class RapidError {
   public name: string
   public code: number
   public message?: string
   public cause?: any
 
-  constructor(error: Error) {
+  constructor(error: RapidErrorDef) {
     this.name = error.name
     this.code = error.code
     this.message = error.message
@@ -18,7 +20,7 @@ export class ApiError {
   }
 }
 
-type Errors<T> = { [k in keyof T]: Error }
+type Errors<T> = { [k in keyof T]: RapidErrorDef }
 type ErrorsIn<Keys extends string> = {
   [K in Keys]: [code: number, message: string]
 }
@@ -37,4 +39,8 @@ export function defineErrors<Keys extends string, T extends ErrorsIn<Keys>>(
     res[k] = { name: k, code: errors[k][0], message: errors[k][1] }
 
   return res
+}
+
+export function sendError(res: Response, error: RapidErrorDef) {
+  res.status(error.code).send(error)
 }

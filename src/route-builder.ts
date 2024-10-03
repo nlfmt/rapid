@@ -1,6 +1,9 @@
 import { z, ZodSchema, ZodString, ZodUnknown } from "zod"
-import { Flatten } from "."
+import { Schema, validate, Infer, InferIn, AdapterResolver } from "@typeschema/main"
+import { RapidErrorDef, Flatten, sendError, RapidError } from "."
 import express from "express"
+
+// validate(z.string(), "hello")
 
 type Awaitable<T> = T | Promise<T>
 
@@ -50,14 +53,15 @@ interface RouteDef<
 type AnyRouteDef = RouteDef<string, any, any, any, any, Awaitable<HandlerResponseTypes>>
 
 
-type NoDisallowedMetaKeys<Meta extends Record<string, any>, NewMeta extends Record<string, any>> = {
+type CheckMiddlewareReturnType<Meta extends Record<string, any>, NewMeta extends Record<string, any>> =
+  {
     [K in keyof NewMeta]:
       K extends keyof Context<string, AnyValidationDef>
         ? `Middleware data can't contain key <${K}>, since it is a key of the base context`
       : K extends keyof Meta
         ? K extends string ? `Middleware data can't contain key <${K}>, since it's been specified by another middleware` : `Middleware data contains a key that's been specified by another middleware`
         : NewMeta[K]
-}
+  }
 
 type Middleware<
   Path extends string,
@@ -66,9 +70,9 @@ type Middleware<
   AddedMeta extends Record<string, any>
 > = (
   c: Flatten<Context<Path, Validation> & Meta>
-) => NoDisallowedMetaKeys<Meta, AddedMeta>
+) => CheckMiddlewareReturnType<Meta, AddedMeta>
 
-type AnyMiddleware = Middleware<string, AnyValidationDef, {}, Record<string, any>>
+type AnyMiddleware = Middleware<string, AnyValidationDef, Record<string, any>, Record<string, any>>
 
 interface MiddlewareBuilder<
   Path extends string,
@@ -113,7 +117,9 @@ type Context<Path extends string, Def extends Partial<AnyValidationDef>> = {
     body: Def["body"] extends ZodSchema ? z.infer<Def["body"]> : unknown
     query: Def["query"] extends ZodSchema ? z.infer<Def["query"]> : unknown
     cookies: Def["cookies"] extends ZodSchema ? z.infer<Def["cookies"]> : unknown
-    params: Def["params"] extends Record<string, any> ? Flatten<{ [K in ExtractUrlParamNames<Path>]: string } & { [x in keyof Def["params"]]: z.infer<Def["params"][x]> }> : { [K in ExtractUrlParamNames<Path>]: string } 
+    params: Def["params"] extends Record<string, any>
+      ? Flatten<{ [K in ExtractUrlParamNames<Path>]: string } & { [x in keyof Def["params"]]: z.infer<Def["params"][x]> }>
+      : { [K in ExtractUrlParamNames<Path>]: string } 
 }
 
 type HTTPMethod = "all" | "get" | "post" | "put" | "delete" | "patch" | "options" | "head"
@@ -135,83 +141,151 @@ interface Rapid<Routes extends Record<string, AnyRouteDef>> {
 }
 
 
-// @ts-ignore "excessively deep type", who cares
-class RapidImpl implements Rapid<AnyRoutes> {
-    public router = express.Router()
+export type RapidErrorLogger = (message: string, err?: unknown) => void
+class RapidStatic {
+  protected static errorLogger: RapidErrorLogger = (m, err) => {
+    console.error(`[Rapid Error] ${m}, err:`, err)
+  }
 
-    all(...args: any[]) {
-        return this._handler("all", ...args)
-    }
-    get(...args: any[]) {
-        return this._handler("get", ...args)
-    }
-    post(...args: any[]) {
-        return this._handler("post", ...args)
-    }
-    put(...args: any[]) {
-        return this._handler("put", ...args)
-    }
-    delete(...args: any[]) {
-        return this._handler("delete", ...args)
-    }
-    patch(...args: any[]) {
-        return this._handler("patch", ...args)
-    }
-    options(...args: any[]) {
-        return this._handler("options", ...args)
-    }
-    head(...args: any[]) {
-        return this._handler("head", ...args)
-    }
-
-    subroute(pathOrRouter: string | Rapid<AnyRoutes>, _router?: Rapid<AnyRoutes>) {
-        if (typeof pathOrRouter === "string") {
-            this.router.use(pathOrRouter, _router!.router)
-        } else {
-            this.router.use(pathOrRouter.router)
-        }
-        return this
-    }
-
-    private _handler(method: HTTPMethod, ...args: any[]) {
-        const path = args.shift() as string
-
-        const hasValidators = typeof args[0] === "object"
-        const validators = hasValidators
-          ? args.shift() as AnyValidationDef
-          : { body: null, query: null, params: null, cookies: null }
-
-        const handler = args.pop() as AnyHandler
-        const middleware = args as AnyMiddleware[]
-
-        this.router[method](path, async (req, res) => {
-            let context = {
-                body: validators.body ? validators.body.parse(req.body) : req.body,
-                query: validators.query ? validators.query.parse(req.query) : req.query,
-                params: validators.params ? validators.params.parse(req.params) : req.params,
-                cookies: validators.cookies ? validators.cookies.parse(req.cookies) : req.cookies,
-            }
-
-            for (const m of middleware) {
-              const data = await m(context)
-              Object.assign(context, data)
-            }
-
-            const response = await handler(context)
-            res.send(response)
-        })
-        return this
-    }
+  public static setErrorLogger(logger: RapidErrorLogger) {
+    this.errorLogger = logger
+  }
 }
 
-export const Rapid = RapidImpl as unknown as { new(): Rapid<{}> }
 
+class RapidImpl extends RapidStatic implements Rapid<AnyRoutes> {
+  public router = express.Router()
+
+  all(...args: any[]) {
+    return this._handler("all", ...args)
+  }
+  get(...args: any[]) {
+    return this._handler("get", ...args)
+  }
+  post(...args: any[]) {
+    return this._handler("post", ...args)
+  }
+  put(...args: any[]) {
+    return this._handler("put", ...args)
+  }
+  delete(...args: any[]) {
+    return this._handler("delete", ...args)
+  }
+  patch(...args: any[]) {
+    return this._handler("patch", ...args)
+  }
+  options(...args: any[]) {
+    return this._handler("options", ...args)
+  }
+  head(...args: any[]) {
+    return this._handler("head", ...args)
+  }
+
+  subroute(
+    pathOrRouter: string | Rapid<AnyRoutes>,
+    _router?: Rapid<AnyRoutes>
+  ) {
+    if (typeof pathOrRouter === "string") {
+      this.router.use(pathOrRouter, _router!.router)
+    } else {
+      this.router.use(pathOrRouter.router)
+    }
+    return this
+  }
+
+  private _handler(method: HTTPMethod, ...args: any[]) {
+    console.log({args})
+    const path = args.shift() as string
+
+    const hasValidators = typeof args[0] === "object"
+    const validators = hasValidators
+      ? (args.shift() as AnyValidationDef)
+      : {}
+
+    const handler = args.pop() as AnyHandler
+    const middleware = args as AnyMiddleware[]
+
+    this.router[method](path, async (req, res) => {
+      let context: Record<string, any> = {
+        req,
+        body: req.body,
+        query: req.query,
+        params: req.params,
+        cookies: req.cookies,
+      }
+
+      // validate body, query, params, cookies and add them to the context
+      for (const type in validators) {
+        const schema = validators[type as keyof AnyValidationDef] as ZodSchema
+        if (!schema) continue
+
+        const data = req[type as keyof AnyValidationDef]
+        const result = schema.safeParse(data)
+
+        if (!result.success) {
+          return sendError(res, {
+            code: 400,
+            name: "Bad Request",
+            message: `Invalid ${type}`,
+            cause: result.error.flatten()
+          })
+        }
+
+        context[type] = result.data
+      }
+
+      // run middleware
+      for (const m of middleware) {
+        try {
+          const data = await m(context as any)
+          Object.assign(context, data)
+        } catch(err) {
+          if (err instanceof RapidError) {
+            return sendError(res, err)
+          } else {
+            RapidImpl.errorLogger("A middleware error occurred while processing the request", err)
+
+            return sendError(res, {
+              code: 500,
+              name: "Internal Server Error",
+              message: "An error occurred while processing the request",
+            })
+          }
+        }
+      }
+
+      // run handler
+      try {
+        const response = await handler(context as any)
+        res.send(response)
+      } catch (err) {
+        if (err instanceof RapidError) return sendError(res, err)
+
+        RapidImpl.errorLogger("An error occurred while processing the request", err)
+        return sendError(res, {
+          code: 500,
+          name: "Internal Server Error",
+          message: "An error occurred while processing the request",
+        })
+      }
+    })
+    return this
+  }
+}
+
+type RapidConstructor = typeof RapidStatic & { new(): Rapid<{}> }
+export const Rapid = RapidImpl as unknown as RapidConstructor
+
+
+Rapid.setErrorLogger(message => {
+  console.error("myerror:", message)
+})
 
 const userRouter = new Rapid()
   .get("/:id", (c) => `User ${c.params.id}`)
   .post("/", (c) => `Create user`)
 
-const app = new Rapid()
+  const app = new Rapid()
   .subroute("/user", userRouter)
   .post(
     "/greet",
@@ -223,7 +297,6 @@ const app = new Rapid()
     c => ({ a: 1 }),
     c => ({ b: 1 }),
     c => ({ c: 1 }),
-    c => ({ d: 1 }),
     (c) => {
       console.log(c)
       return `Hello, ${c.body.name}!`

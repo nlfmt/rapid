@@ -1,6 +1,6 @@
 import { Request, Response, Router } from "express"
 import z from "zod"
-import { ApiError, Error } from "./error"
+import { RapidError, RapidErrorDef } from "./error"
 
 export * from "./error"
 
@@ -42,7 +42,7 @@ type RouteSchema = {
   context: object | null
 }
 
-export type ErrorFunction = (error: Error) => void
+export type ErrorFunction = (error: RapidErrorDef) => void
 
 /**
  * Route Handler function
@@ -256,7 +256,7 @@ export class RouteBuilder<
 
   private applyRoute(method: HttpMethod, handler: RouteHandler<Schema>) {
     this.router[method](this.path, async (req, res) => {
-      const error = (error: Error) => {
+      const error = (error: RapidErrorDef) => {
         res.status(error.code).json(error)
       }
 
@@ -345,7 +345,7 @@ export class RouteBuilder<
           )
         }
       } catch (err) {
-        if (err instanceof ApiError) {
+        if (err instanceof RapidError) {
           return error(err)
         } else {
           console.error(err)
