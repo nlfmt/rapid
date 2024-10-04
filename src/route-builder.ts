@@ -1,8 +1,8 @@
 import { Schema, validate, Infer } from "@typeschema/main"
-import { Flatten, sendError, RapidError } from "."
+import { sendError, RapidError } from "./error"
 import express from "express"
 
-
+type Flatten<T> = { [K in keyof T]: T[K] } & {}
 type Awaitable<T> = T | Promise<T>
 
 const _unsetMarker = Symbol('UnsetMarker')
@@ -359,14 +359,10 @@ export const combineMiddlewares = ((
     }
     return c
   }
-}) as CombineMiddleware
+}) as unknown as CombineMiddleware
 
 combineMiddlewares.withContext = (() =>  combineMiddlewares) as any
 
-combineMiddlewares(
-  () => ({ a: 1 }),
-  (c) => ({ b: c.a + 1 }),
-)
 
 type RegisterHandler<Routes extends AnyRoutes> = {
 

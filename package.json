@@ -35,14 +35,10 @@
     "express": "^4.19.2"
   },
   "devDependencies": {
-    "zod": "^3.23.8",
-    "cookie-parser": "^1.4.6",
-    "@typeschema/zod": "^0.14.0",
-    "@types/cookie-parser": "^1.4.7",
     "@changesets/cli": "^2.27.1",
     "@types/express": "^4.17.21",
-    "@types/node": "^20.11.16",
-    "tsup": "^8.0.1",
-    "typescript": "^5.3.3"
+    "@types/node": "^20.16.10",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.2"
   }
 }
