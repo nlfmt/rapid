@@ -60,7 +60,7 @@ type AnyRouteDef = RouteDef<string, Schema, Schema, Schema, Schema, Awaitable<Ha
 type CheckMiddlewareReturnType<Meta extends Record<string, any>, NewMeta> =
   NewMeta extends Record<string, any> ? {
     [K in keyof NewMeta]:
-      K extends keyof Context<string, AnyValidationDef>
+      K extends keyof CreateContext<string, AnyValidationDef>
         ? `Middleware data can't contain key <${K}>, since it is a key of the base context`
       : K extends keyof Meta
         ? K extends string ? `Middleware data can't contain key <${K}>, since it's been specified by another middleware` : `Middleware data contains a key that's been specified by another middleware`
@@ -68,16 +68,17 @@ type CheckMiddlewareReturnType<Meta extends Record<string, any>, NewMeta> =
   } : NewMeta
 
 
-type Middleware<
+type CreateMiddleware<
   Path extends string,
   Validation extends Partial<AnyValidationDef>,
   Meta extends Record<string, any>,
   AddedMeta
-> = (
-  c: Flatten<Context<Path, Validation> & Meta>
-) => Awaitable<CheckMiddlewareReturnType<Meta, AddedMeta>>
-
-type AnyMiddleware = Middleware<string, AnyValidationDef, Record<string, any>, Record<string, any>>
+> = Middleware<
+  Flatten<CreateContext<Path, Validation> & Meta>,
+  Awaitable<CheckMiddlewareReturnType<Meta, AddedMeta>>
+>
+type Middleware<Input extends Record<string, any>, Output> = (c: Input) => Awaitable<CheckMiddlewareReturnType<Input, Output>>
+type AnyMiddleware = Middleware<Record<string, any>, any>
 
 interface MiddlewareBuilder<
   Path extends string,
@@ -85,19 +86,12 @@ interface MiddlewareBuilder<
   Meta extends Record<string, any>
 > {
   use: <M extends Record<string, any>>(
-    middleware: Middleware<Path, Validation, Meta, M>
+    middleware: CreateMiddleware<Path, Validation, Meta, M>
   ) => MiddlewareBuilder<Path, Validation, Meta & M>
 }
-type MiddlewareBuilderFn<
-  Path extends string,
-  Validation extends AnyValidationDef,
-  Meta extends Record<string, any>
-> = (
-  m: MiddlewareBuilder<Path, Validation, {}>
-) => MiddlewareBuilder<Path, Validation, Meta>
 
 
-type Handler<Path extends string, Def extends AnyValidationDef, R extends Awaitable<HandlerResponseTypes>> = (c: Context<Path, Def>) => R
+type Handler<Path extends string, Def extends AnyValidationDef, R extends Awaitable<HandlerResponseTypes>> = (c: CreateContext<Path, Def>) => R
 type AnyHandler = Handler<string, AnyValidationDef, Awaitable<HandlerResponseTypes>>
 type AnyRoutes = Record<string, AnyRouteDef>
 
@@ -125,12 +119,12 @@ type InferValidated<T extends Partial<AnyValidationDef>, P extends keyof AnyVali
     : unknown
   : unknown
 
-type Context<Path extends string, Def extends Partial<AnyValidationDef>> = {
-  body: InferValidated<Def, "body">
-  query: InferValidated<Def, "query">
-  cookies: InferValidated<Def, "cookies">
+type CreateContext<Path extends string, Def extends Partial<AnyValidationDef>> = Context<
+  InferValidated<Def, "body">,
+  InferValidated<Def, "query">,
+  InferValidated<Def, "cookies">,
 
-  params: Def["params"] extends Record<string, any>
+  Def["params"] extends Record<string, any>
     ? Flatten<{
         [K in ExtractUrlParamNames<Path>]: K extends keyof Def["params"]
           ? Def["params"][K] extends Schema
@@ -139,7 +133,20 @@ type Context<Path extends string, Def extends Partial<AnyValidationDef>> = {
           : string
       }>
     : { [K in ExtractUrlParamNames<Path>]: string }
+>
+export interface Context<
+  Body,
+  Query,
+  Cookies,
+  Params
+> {
+  body: Body
+  query: Query
+  cookies: Cookies
+  params: Params
 }
+export type InitialContext = Context<unknown, unknown, unknown, unknown>
+type AnyContext = Context<any, any, any, any>
 
 type HTTPMethod = "all" | "get" | "post" | "put" | "delete" | "patch" | "options" | "head"
 
@@ -219,7 +226,6 @@ class RapidImpl extends RapidStatic implements Rapid<AnyRoutes> {
       if (!schema) continue
 
       const result = await validate(schema, input[key])
-      console.log("validating", key, input[key], result)
       if (!result.success) return {
         key,
         issues: result.issues
@@ -318,50 +324,69 @@ class RapidImpl extends RapidStatic implements Rapid<AnyRoutes> {
 }
 
 type RapidConstructor = typeof RapidStatic & { new(): Rapid<{}> }
-export const Rapid = RapidImpl as unknown as RapidConstructor
+const _Rapid = RapidImpl as unknown as RapidConstructor
+export { _Rapid as Rapid }
 
 
-type CombineMiddleware<P extends string = string, M extends Record<string, any> = {}, V extends Partial<AnyValidationDef> = InitialValidationDef<P>> = {
+type CombineMiddleware<C extends Partial<AnyContext> = InitialContext> = {
+  <M1, C1 extends Partial<AnyContext> = InitialContext>(
+    m1: Middleware<C1, M1>,
+  ): Middleware<ToFullContext<C1>, M1>
+
   <M1, M2>(
-    m1: Middleware<P, V, M, M1>,
-    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>
-  ): Middleware<P, V, M, MergeMeta<[M, M1, M2]>>
+    m1: Middleware<C, M1>,
+    m2: Middleware<MergeMeta<[C, M1]>, M2>
+  ): Middleware<ToFullContext<C>, MergeMeta<[M1, M2]>>
 
   <M1, M2, M3>(
-    m1: Middleware<P, V, M, M1>,
-    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>,
-    m3: Middleware<P, V, MergeMeta<[M, M1, M2]>, M3>
-  ): Middleware<P, V, M, MergeMeta<[M, M1, M2, M3]>>
+    m1: Middleware<C, M1>,
+    m2: Middleware<MergeMeta<[C, M1]>, M2>,
+    m3: Middleware<MergeMeta<[C, M1, M2]>, M3>
+  ): Middleware<ToFullContext<C>, MergeMeta<[M1, M2, M3]>>
 
   <M1, M2, M3, M4>(
-    m1: Middleware<P, V, M, M1>,
-    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>,
-    m3: Middleware<P, V, MergeMeta<[M, M1, M2]>, M3>,
-    m4: Middleware<P, V, MergeMeta<[M, M1, M2, M3]>, M4>
-  ): Middleware<P, V, M, MergeMeta<[M, M1, M2, M3, M4]>>
+    m1: Middleware<C, M1>,
+    m2: Middleware<MergeMeta<[C, M1]>, M2>,
+    m3: Middleware<MergeMeta<[C, M1, M2]>, M3>,
+    m4: Middleware<MergeMeta<[C, M1, M2, M3]>, M4>
+  ): Middleware<ToFullContext<C>, MergeMeta<[M1, M2, M3, M4]>>
 
   <M1, M2, M3, M4, M5>(
-    m1: Middleware<P, V, M, M1>,
-    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>,
-    m3: Middleware<P, V, MergeMeta<[M, M1, M2]>, M3>,
-    m4: Middleware<P, V, MergeMeta<[M, M1, M2, M3]>, M4>,
-    m5: Middleware<P, V, MergeMeta<[M, M1, M2, M3, M4]>, M5>
-  ): Middleware<P, V, M, MergeMeta<[M, M1, M2, M3, M4, M5]>>
+    m1: Middleware<C, M1>,
+    m2: Middleware<MergeMeta<[C, M1]>, M2>,
+    m3: Middleware<MergeMeta<[C, M1, M2]>, M3>,
+    m4: Middleware<MergeMeta<[C, M1, M2, M3]>, M4>,
+    m5: Middleware<MergeMeta<[C, M1, M2, M3, M4]>, M5>
+  ): Middleware<ToFullContext<C>, MergeMeta<[M1, M2, M3, M4, M5]>>
 
-  withContext: <P extends string, V extends Partial<AnyValidationDef>, M extends Record<string, any>>() => CombineMiddleware<P, M, V>
+  afterContext: <C extends Partial<AnyContext>>() => CombineMiddleware<C>
+  after: <M extends (...args: any) => any>() => CombineMiddleware<ContextAfter<M>>
 }
-export const combineMiddlewares = ((
-  ...middlewares: AnyMiddleware[]
+export const middleware = ((
+  ...fns: AnyMiddleware[]
 ) => {
-  return async (c: any) => {
-    for (const m of middlewares) {
-      c = await m(c)
+  if (fns.length === 1) return fns[0]
+  
+  return async (c: AnyContext) => {
+    for (const m of fns) {
+      const d = await m(c)
+      Object.assign(c, d)
     }
-    return c
   }
 }) as unknown as CombineMiddleware
 
-combineMiddlewares.withContext = (() =>  combineMiddlewares) as any
+middleware.after = middleware.afterContext = (() => middleware) as any
+
+export type ContextAfter<M extends (...args: any) => any> = M extends (c: infer C) => infer R ? Flatten<MergeMeta<[InitialContext, C, Awaited<R>]>> : never
+
+type ToFullContext<T extends Partial<AnyContext>> = Context<
+  "body" extends keyof T ? T["body"] : unknown,
+  "query" extends keyof T ? T["query"] : unknown,
+  "cookies" extends keyof T ? T["cookies"] : unknown,
+  "params" extends keyof T ? T["params"] : unknown
+>
+
+export type GetRoutes<T extends Rapid<AnyRoutes>> = T extends Rapid<infer Routes> ? Routes : never
 
 
 type RegisterHandler<Routes extends AnyRoutes> = {
@@ -373,7 +398,7 @@ type RegisterHandler<Routes extends AnyRoutes> = {
     R extends Awaitable<HandlerResponseTypes>
   >(
     path: P,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>>>) => R
+    handler: (c: Flatten<CreateContext<P, InitialValidationDef<P>>>) => R
   ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   
   <
@@ -383,7 +408,7 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   >(
     path: P,
     schema: S,
-    handler: (c: Flatten<Context<P, S>>) => R
+    handler: (c: Flatten<CreateContext<P, S>>) => R
   ): Rapid<AddRoute<Routes, P, S, R>>
 
 
@@ -398,8 +423,8 @@ type RegisterHandler<Routes extends AnyRoutes> = {
     M1
   >(
     path: P,
-    middleware: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1]>>) => R
+    middleware: CreateMiddleware<P, InitialValidationDef<P>, {}, M1>,
+    handler: (c: Flatten<CreateContext<P, InitialValidationDef<P>> & MergeMeta<[{}, M1]>>) => R
   ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   <
     P extends string,
@@ -407,9 +432,9 @@ type RegisterHandler<Routes extends AnyRoutes> = {
     M1, M2
   >(
     path: P,
-    middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    middleware2: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2]>>) => R
+    middleware1: CreateMiddleware<P, InitialValidationDef<P>, {}, M1>,
+    middleware2: CreateMiddleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
+    handler: (c: Flatten<CreateContext<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2]>>) => R
   ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   <
     P extends string,
@@ -417,10 +442,10 @@ type RegisterHandler<Routes extends AnyRoutes> = {
     M1, M2, M3
   >(
     path: P,
-    middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    middleware2: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
-    middleware3: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2]>, M3>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2, M3]>>) => R
+    middleware1: CreateMiddleware<P, InitialValidationDef<P>, {}, M1>,
+    middleware2: CreateMiddleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
+    middleware3: CreateMiddleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2]>, M3>,
+    handler: (c: Flatten<CreateContext<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2, M3]>>) => R
   ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   <
     P extends string,
@@ -428,11 +453,11 @@ type RegisterHandler<Routes extends AnyRoutes> = {
     M1, M2, M3, M4
   >(
     path: P,
-    middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    middleware2: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
-    middleware3: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2]>, M3>,
-    middleware4: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2, M3]>, M4>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2, M3, M4]>>) => R
+    middleware1: CreateMiddleware<P, InitialValidationDef<P>, {}, M1>,
+    middleware2: CreateMiddleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
+    middleware3: CreateMiddleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2]>, M3>,
+    middleware4: CreateMiddleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2, M3]>, M4>,
+    handler: (c: Flatten<CreateContext<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2, M3, M4]>>) => R
   ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   
 
@@ -448,8 +473,8 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   >(
     path: P,
     schema: S,
-    middleware: Middleware<P, S, {}, M1>,
-    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1]>>) => R
+    middleware: CreateMiddleware<P, S, {}, M1>,
+    handler: (c: Flatten<CreateContext<P, S> & MergeMeta<[{}, M1]>>) => R
   ): Rapid<AddRoute<Routes, P, S, R>>
 
   <
@@ -460,9 +485,9 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   >(
     path: P,
     schema: S,
-    middleware1: Middleware<P, S, {}, M1>,
-    middleware2: Middleware<P, S, MergeMeta<[{}, M1]>, M2>,
-    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1, M2]>>) => R
+    middleware1: CreateMiddleware<P, S, {}, M1>,
+    middleware2: CreateMiddleware<P, S, MergeMeta<[{}, M1]>, M2>,
+    handler: (c: Flatten<CreateContext<P, S> & MergeMeta<[{}, M1, M2]>>) => R
   ): Rapid<AddRoute<Routes, P, S, R>>
   
   <
@@ -473,10 +498,10 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   >(
     path: P,
     schema: S,
-    middleware1: Middleware<P, S, {}, M1>,
-    middleware2: Middleware<P, S, MergeMeta<[{}, M1]>, M2>,
-    middleware3: Middleware<P, S, MergeMeta<[{}, M1, M2]>, M3>,
-    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1, M2, M3]>>) => R
+    middleware1: CreateMiddleware<P, S, {}, M1>,
+    middleware2: CreateMiddleware<P, S, MergeMeta<[{}, M1]>, M2>,
+    middleware3: CreateMiddleware<P, S, MergeMeta<[{}, M1, M2]>, M3>,
+    handler: (c: Flatten<CreateContext<P, S> & MergeMeta<[{}, M1, M2, M3]>>) => R
   ): Rapid<AddRoute<Routes, P, S, R>>
   
   <
@@ -487,11 +512,11 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   >(
     path: P,
     schema: S,
-    middleware1: Middleware<P, S, {}, M1>,
-    middleware2: Middleware<P, S, MergeMeta<[{}, M1]>, M2>,
-    middleware3: Middleware<P, S, MergeMeta<[{}, M1, M2]>, M3>,
-    middleware4: Middleware<P, S, MergeMeta<[{}, M1, M2, M3]>, M4>,
-    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1, M2, M3, M4]>>) => R
+    middleware1: CreateMiddleware<P, S, {}, M1>,
+    middleware2: CreateMiddleware<P, S, MergeMeta<[{}, M1]>, M2>,
+    middleware3: CreateMiddleware<P, S, MergeMeta<[{}, M1, M2]>, M3>,
+    middleware4: CreateMiddleware<P, S, MergeMeta<[{}, M1, M2, M3]>, M4>,
+    handler: (c: Flatten<CreateContext<P, S> & MergeMeta<[{}, M1, M2, M3, M4]>>) => R
   ): Rapid<AddRoute<Routes, P, S, R>>
 }
 

@@ -1,81 +1,94 @@
-// import { z } from "zod"
-// import { combineMiddlewares, Rapid } from "./route-builder"
-// import express from "express"
-// import cookieParser from "cookie-parser"
-// import "@typeschema/zod"
+import { z, ZodString } from "zod"
+import { Context, ContextAfter, GetRoutes, InitialContext, middleware, Rapid } from "."
+import express from "express"
+import cookieParser from "cookie-parser"
+import "@typeschema/zod"
 
-// const myBodySchema = z.object({
-//   name: z.string(),
-// })
+const myBodySchema = z.object({
+  name: z.string(),
+})
 
-// // combineMiddlewares(
-// //   (c) => {
-// //     console.log(c.params.id)
-// //   },
-// //   (c) => {
-// //     console.log(c.params.id)
-// //   }
-// // )
+const testMdlware = middleware((c: { params: { id: string }, a: string }) => {
+    return { juhu: 4 }
+})
 
-// const testMdlware = (c: { params: { id: string }, a: string }) => { console.log(c.params.id, c.a); return { juhu: 4 } }
+const combined = middleware.after<typeof testMdlware>()(
+  (c) => {
+    return { combined: c.params.id }
+  },
+  (c) => {
+  },
+)
 
-// Rapid.setErrorLogger((message) => {
-//   console.error("myerror:", message)
-// })
+Rapid.setErrorLogger((message) => {
+  console.error("myerror:", message)
+})
 
-// const userRouter = new Rapid()
-//   .get("/:id", (c) => `User ${c.params.id}`)
-//   .post("/", (c) => `Create user`)
+const userRouter = new Rapid()
+  .get("/:id", (c) => `User ${c.params.id}`)
+  .post("/", (c) => `Create user`)
 
-// const app = new Rapid()
-//   .subroute("/user", userRouter)
-//   .post(
-//     "/greet/:id",
-//     {
-//       body: myBodySchema,
-//       params: {
-//         id: z.string(),
-//       },
-//     },
+const app = new Rapid()
+  .subroute("/user", userRouter)
+  .post(
+    "/greet/:id",
+    {
+      body: myBodySchema,
+      params: {
+        id: z.string().regex(/^\d+$/),
+      },
+    },
 
-//     (c) => ({ a: "1" }),
-//     async c => ({ async_b: 1 }),
-//     c => ({ b: 1 }),
-//     testMdlware,
+    (c) => ({ a: "1" }),
+    c => ({ async_b: 1 }),
+    combined,
+    testMdlware,
 
-//     (c) => {
-//       console.log(c)
-//       return `Hello, ${c.body.name}!`
-//     }
-//   )
-//   .post(
-//     "/greet2/:name",
-//     {
-//       params: {
-//         name: z.string(),
-//       },
-//       body: z.object({
-//         name: z.string(),
-//       }),
-//       cookies: z.object({
-//         aCookie: z.string(),
-//       }),
-//       query: z.object({
-//         someQuery: z.string(),
-//       }),
-//     },
-//     (c) => ({ a: 1 }),
-//     (c) => ({ b: 1 }),
-//     (c) => ({ c: 1 }),
-//     (c) => ({ d: 1 }),
-//     (c) => `Hello ${c.params.name}!,  ${c.a} ${c.b} ${c.c} ${c.d}`
-//   )
+    (c) => {
+      return {
+        greeting: `Hello, ${c.body.name}!`,
+        paramsId: c.params.id,
+        a: c.a,
+        async_b: c.async_b,
+        juhu: c.juhu,
+        combined: c.combined
+      }
+    }
+  )
+  .post(
+    "/greet2/:name",
+    {
+      params: {
+        name: z.string(),
+      },
+      body: z.object({
+        name: z.string(),
+      }),
+      cookies: z.object({
+        aCookie: z.string(),
+      }),
+      query: z.object({
+        someQuery: z.string(),
+      }),
+    },
+    (c) => ({ a: 1 }),
+    (c) => ({ b: 1 }),
+    (c) => ({ c: 1 }),
+    (c) => ({ d: 1 }),
+    (c) => `Hello ${c.params.name}!,  ${c.a} ${c.b} ${c.c} ${c.d}`
+  )
 
-// const expressApp = express()
-// expressApp.use(express.json())
-// expressApp.use(cookieParser())
-// expressApp.use(app.router)
+const myApp = new Rapid()
+  .get("/hello", (c) => "Hello, World!")
 
-// expressApp.listen(3000, () => {
-//   console.log("Server started")
-// })
+type routes = GetRoutes<typeof myApp>
+
+const expressApp = express()
+expressApp.use(express.json())
+expressApp.use(cookieParser())
+expressApp.use(app.router)
+
+const PORT = 3000
+expressApp.listen(PORT, () => {
+  console.log(`Server started on port ${PORT}`)
+})
