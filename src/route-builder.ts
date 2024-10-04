@@ -1,9 +1,7 @@
-import { z, ZodSchema, ZodString, ZodUnknown } from "zod"
-import { Schema, validate, Infer, InferIn, AdapterResolver } from "@typeschema/main"
-import { RapidErrorDef, Flatten, sendError, RapidError } from "."
+import { Schema, validate, Infer } from "@typeschema/main"
+import { Flatten, sendError, RapidError } from "."
 import express from "express"
 
-// validate(z.string(), "hello")
 
 type Awaitable<T> = T | Promise<T>
 
@@ -22,55 +20,62 @@ type ResponseTransformer<T> = T
  */
 type ValidationDef<
     Path extends string,
-    Body extends ZodSchema,
-    Query extends ZodSchema,
-    Cookies extends ZodSchema,
+    Body extends Schema | UnsetMarker,
+    Query extends Schema | UnsetMarker,
+    Cookies extends Schema | UnsetMarker,
     Params extends UrlParamSchema<Path>,
 > = {
-    body?: Body
-    query?: Query
-    params?: Params
-    cookies?: Cookies
+    body: Body
+    query: Query
+    params: Params
+    cookies: Cookies
 }
-type AnyValidationDef = ValidationDef<string, ZodSchema, ZodSchema, ZodSchema, Record<string,any>>
-type InitialValidationDef<Path extends string> = ValidationDef<Path, ZodUnknown, ZodUnknown, ZodUnknown, UrlParamSchema<Path>>
+type AnyValidationDef = ValidationDef<string, any, any, any, Record<string, Schema>>
+type InitialValidationDef<Path extends string> = ValidationDef<Path, UnsetMarker, UnsetMarker, UnsetMarker, UrlParamSchema<Path>>
 
-type Merge<A extends Record<string, any>, B extends Record<string, any>> = Flatten<{
-    [K in keyof A]: K extends keyof B ? B[K] : A[K]
-}>
+
+// this type should be usable like this:
+// type MergedMeta = MergeMeta<[M1, M2, M3, M4]>
+type MergeMeta<T> = T extends [infer Head, ...infer Tail]
+  ? Head extends Record<string, any>
+    ? MergeMeta<Tail> & Head
+    : MergeMeta<Tail>
+  : {}
+
 
 interface RouteDef<
     Path extends string,
-    Body extends ZodSchema,
-    Query extends ZodSchema,
+    Body extends Schema,
+    Query extends Schema,
     Params extends UrlParamSchema<Path>,
-    Cookies extends ZodSchema,
+    Cookies extends Schema,
     Output extends Awaitable<HandlerResponseTypes>
-> extends ValidationDef<Path, Body, Query, Cookies, Params> {
+> extends Partial<ValidationDef<Path, Body, Query, Cookies, Params>> {
     path: Path
-    response: ResponseTransformer<Output>
+    output: ResponseTransformer<Output>
 }
-type AnyRouteDef = RouteDef<string, any, any, any, any, Awaitable<HandlerResponseTypes>>
+type AnyRouteDef = RouteDef<string, Schema, Schema, Schema, Schema, Awaitable<HandlerResponseTypes>>
 
 
-type CheckMiddlewareReturnType<Meta extends Record<string, any>, NewMeta extends Record<string, any>> =
-  {
+type CheckMiddlewareReturnType<Meta extends Record<string, any>, NewMeta> =
+  NewMeta extends Record<string, any> ? {
     [K in keyof NewMeta]:
       K extends keyof Context<string, AnyValidationDef>
         ? `Middleware data can't contain key <${K}>, since it is a key of the base context`
       : K extends keyof Meta
         ? K extends string ? `Middleware data can't contain key <${K}>, since it's been specified by another middleware` : `Middleware data contains a key that's been specified by another middleware`
         : NewMeta[K]
-  }
+  } : NewMeta
+
 
 type Middleware<
   Path extends string,
-  Validation extends AnyValidationDef,
+  Validation extends Partial<AnyValidationDef>,
   Meta extends Record<string, any>,
-  AddedMeta extends Record<string, any>
+  AddedMeta
 > = (
   c: Flatten<Context<Path, Validation> & Meta>
-) => CheckMiddlewareReturnType<Meta, AddedMeta>
+) => Awaitable<CheckMiddlewareReturnType<Meta, AddedMeta>>
 
 type AnyMiddleware = Middleware<string, AnyValidationDef, Record<string, any>, Record<string, any>>
 
@@ -106,20 +111,34 @@ type ExtractUrlParamNames<T extends string> =
 
 /** Get object of params from url string */
 type UrlParamSchema<Path extends string> = {
-  [K in ExtractUrlParamNames<Path>]: z.ZodSchema
+  [K in ExtractUrlParamNames<Path>]: Schema
 }
 
 type PrefixKeys<T extends Record<string, any>, P extends string> = {
   [K in keyof T as `${P}${K & string}`]: T[K];
 }
 
+type InferValidated<T extends Partial<AnyValidationDef>, P extends keyof AnyValidationDef> =
+  P extends keyof T ?
+    T[P] extends Schema
+    ? Infer<T[P]>
+    : unknown
+  : unknown
+
 type Context<Path extends string, Def extends Partial<AnyValidationDef>> = {
-    body: Def["body"] extends ZodSchema ? z.infer<Def["body"]> : unknown
-    query: Def["query"] extends ZodSchema ? z.infer<Def["query"]> : unknown
-    cookies: Def["cookies"] extends ZodSchema ? z.infer<Def["cookies"]> : unknown
-    params: Def["params"] extends Record<string, any>
-      ? Flatten<{ [K in ExtractUrlParamNames<Path>]: string } & { [x in keyof Def["params"]]: z.infer<Def["params"][x]> }>
-      : { [K in ExtractUrlParamNames<Path>]: string } 
+  body: InferValidated<Def, "body">
+  query: InferValidated<Def, "query">
+  cookies: InferValidated<Def, "cookies">
+
+  params: Def["params"] extends Record<string, any>
+    ? Flatten<{
+        [K in ExtractUrlParamNames<Path>]: K extends keyof Def["params"]
+          ? Def["params"][K] extends Schema
+            ? Infer<Def["params"][K]>
+            : string
+          : string
+      }>
+    : { [K in ExtractUrlParamNames<Path>]: string }
 }
 
 type HTTPMethod = "all" | "get" | "post" | "put" | "delete" | "patch" | "options" | "head"
@@ -147,6 +166,7 @@ class RapidStatic {
     console.error(`[Rapid Error] ${m}, err:`, err)
   }
 
+  /** Specify a logger for critical errors instead of the standard `console.error` */
   public static setErrorLogger(logger: RapidErrorLogger) {
     this.errorLogger = logger
   }
@@ -193,14 +213,30 @@ class RapidImpl extends RapidStatic implements Rapid<AnyRoutes> {
     return this
   }
 
+  private async validateToOutput(schemas: Record<string, Schema>, input: Record<string, any>, output: Record<string, any>) {
+    for (const key in schemas) {
+      const schema = schemas[key]
+      if (!schema) continue
+
+      const result = await validate(schema, input[key])
+      console.log("validating", key, input[key], result)
+      if (!result.success) return {
+        key,
+        issues: result.issues
+      }
+
+      output[key] = result.data
+    }
+  }
+
   private _handler(method: HTTPMethod, ...args: any[]) {
-    console.log({args})
     const path = args.shift() as string
 
-    const hasValidators = typeof args[0] === "object"
-    const validators = hasValidators
-      ? (args.shift() as AnyValidationDef)
-      : {}
+    const {
+      params: paramsValidator,
+      ...validators
+    }: Partial<AnyValidationDef> =
+      typeof args[0] === "object" ? args.shift() : {}
 
     const handler = args.pop() as AnyHandler
     const middleware = args as AnyMiddleware[]
@@ -214,25 +250,33 @@ class RapidImpl extends RapidStatic implements Rapid<AnyRoutes> {
         cookies: req.cookies,
       }
 
-      // validate body, query, params, cookies and add them to the context
-      for (const type in validators) {
-        const schema = validators[type as keyof AnyValidationDef] as ZodSchema
-        if (!schema) continue
+      // validate the params
+      if (typeof paramsValidator === "object") {
+        const err = await this.validateToOutput(
+          paramsValidator,
+          req.params,
+          context.params
+        )
 
-        const data = req[type as keyof AnyValidationDef]
-        const result = schema.safeParse(data)
-
-        if (!result.success) {
+        if (err) {
           return sendError(res, {
-            code: 400,
-            name: "Bad Request",
-            message: `Invalid ${type}`,
-            cause: result.error.flatten()
+            code: 404,
+            name: "Not Found",
+            message: `Invalid route param ${err.key}`,
+            cause: err.issues
           })
         }
-
-        context[type] = result.data
       }
+
+      // validate body, query and cookies and add them to the context
+      const err = await this.validateToOutput(validators as Record<string, Schema>, req, context)
+      
+      if (err) return sendError(res, {
+        code: 400,
+        name: "Bad Request",
+        message: `Invalid ${err.key}`,
+        cause: err.issues
+      })
 
       // run middleware
       for (const m of middleware) {
@@ -243,7 +287,7 @@ class RapidImpl extends RapidStatic implements Rapid<AnyRoutes> {
           if (err instanceof RapidError) {
             return sendError(res, err)
           } else {
-            RapidImpl.errorLogger("A middleware error occurred while processing the request", err)
+            RapidImpl.errorLogger("An unexpected middleware error occurred while processing the request", err)
 
             return sendError(res, {
               code: 500,
@@ -277,71 +321,52 @@ type RapidConstructor = typeof RapidStatic & { new(): Rapid<{}> }
 export const Rapid = RapidImpl as unknown as RapidConstructor
 
 
-Rapid.setErrorLogger(message => {
-  console.error("myerror:", message)
-})
+type CombineMiddleware<P extends string = string, M extends Record<string, any> = {}, V extends Partial<AnyValidationDef> = InitialValidationDef<P>> = {
+  <M1, M2>(
+    m1: Middleware<P, V, M, M1>,
+    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>
+  ): Middleware<P, V, M, MergeMeta<[M, M1, M2]>>
 
-const userRouter = new Rapid()
-  .get("/:id", (c) => `User ${c.params.id}`)
-  .post("/", (c) => `Create user`)
+  <M1, M2, M3>(
+    m1: Middleware<P, V, M, M1>,
+    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>,
+    m3: Middleware<P, V, MergeMeta<[M, M1, M2]>, M3>
+  ): Middleware<P, V, M, MergeMeta<[M, M1, M2, M3]>>
 
-  const app = new Rapid()
-  .subroute("/user", userRouter)
-  .post(
-    "/greet",
-    {
-      body: z.object({
-        name: z.string(),
-      }),
-    },
-    c => ({ a: 1 }),
-    c => ({ b: 1 }),
-    c => ({ c: 1 }),
-    (c) => {
-      console.log(c)
-      return `Hello, ${c.body.name}!`
+  <M1, M2, M3, M4>(
+    m1: Middleware<P, V, M, M1>,
+    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>,
+    m3: Middleware<P, V, MergeMeta<[M, M1, M2]>, M3>,
+    m4: Middleware<P, V, MergeMeta<[M, M1, M2, M3]>, M4>
+  ): Middleware<P, V, M, MergeMeta<[M, M1, M2, M3, M4]>>
+
+  <M1, M2, M3, M4, M5>(
+    m1: Middleware<P, V, M, M1>,
+    m2: Middleware<P, V, MergeMeta<[M, M1]>, M2>,
+    m3: Middleware<P, V, MergeMeta<[M, M1, M2]>, M3>,
+    m4: Middleware<P, V, MergeMeta<[M, M1, M2, M3]>, M4>,
+    m5: Middleware<P, V, MergeMeta<[M, M1, M2, M3, M4]>, M5>
+  ): Middleware<P, V, M, MergeMeta<[M, M1, M2, M3, M4, M5]>>
+
+  withContext: <P extends string, V extends Partial<AnyValidationDef>, M extends Record<string, any>>() => CombineMiddleware<P, M, V>
+}
+export const combineMiddlewares = ((
+  ...middlewares: AnyMiddleware[]
+) => {
+  return async (c: any) => {
+    for (const m of middlewares) {
+      c = await m(c)
     }
-  )
-  .get("/greet/:name",
-    {
-      params: {
-        name: z.string()
-      },
-      body: z.object({
-        name: z.string(),
-      }),
-      cookies: z.object({
-        aCookie: z.string()
-      }),
-      query: z.object({
-        someQuery: z.string()
-      })
-    },
-    c => ({ a: 1 }),
-    c => ({ b: 1 }),
-    c => ({ c: 1 }),
-    c => ({ d: 1 }),
-    (c) => `Hello ${c.params.name}!,  ${c.a} ${c.b} ${c.c} ${c.d}`
-  )
+    return c
+  }
+}) as CombineMiddleware
 
+combineMiddlewares.withContext = (() =>  combineMiddlewares) as any
 
-
-
-type test<T extends Rapid<AnyRoutes>> = T extends Rapid<infer R> ? R : never
-type res = test<typeof app>
-
-const expressApp = express()
-expressApp.use(express.json())
-expressApp.use(app.router)
-
-expressApp.listen(3000, () => {
-    console.log("Server started")
-})
-
-
-// function combineMiddleware<
-  
-
+combineMiddlewares(
+  () => ({ a: 1 }),
+  (c) => ({ b: c.a + 1 }),
+)
 
 type RegisterHandler<Routes extends AnyRoutes> = {
 
@@ -353,19 +378,17 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   >(
     path: P,
     handler: (c: Flatten<Context<P, InitialValidationDef<P>>>) => R
-  ): Rapid<
-    Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>
-  >;
+  ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   
   <
     P extends string,
     R extends Awaitable<HandlerResponseTypes>,
-    S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>
+    S extends Partial<ValidationDef<P, Schema, Schema, Schema, UrlParamSchema<P>>>
   >(
     path: P,
     schema: S,
     handler: (c: Flatten<Context<P, S>>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
+  ): Rapid<AddRoute<Routes, P, S, R>>
 
 
 
@@ -376,1169 +399,106 @@ type RegisterHandler<Routes extends AnyRoutes> = {
   <
     P extends string,
     R extends Awaitable<HandlerResponseTypes>,
-    M1 extends Record<string, any>,
+    M1
   >(
     path: P,
     middleware: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
+    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1]>>) => R
+  ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   <
     P extends string,
     R extends Awaitable<HandlerResponseTypes>,
-    M1 extends Record<string, any>,
-    M2 extends Record<string, any>,
+    M1, M2
   >(
     path: P,
     middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
+    middleware2: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
+    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2]>>) => R
+  ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   <
     P extends string,
     R extends Awaitable<HandlerResponseTypes>,
-    M1 extends Record<string, any>,
-    M2 extends Record<string, any>,
-    M3 extends Record<string, any>,
+    M1, M2, M3
   >(
     path: P,
     middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-    middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
+    middleware2: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
+    middleware3: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2]>, M3>,
+    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2, M3]>>) => R
+  ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
   <
     P extends string,
     R extends Awaitable<HandlerResponseTypes>,
-    M1 extends Record<string, any>,
-    M2 extends Record<string, any>,
-    M3 extends Record<string, any>,
-    M4 extends Record<string, any>,
+    M1, M2, M3, M4
   >(
     path: P,
     middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-    middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-    middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-    middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  //   M18 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   middleware18: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17, M18>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  //   M18 extends Record<string, any>,
-  //   M19 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   middleware18: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17, M18>,
-  //   middleware19: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18, M19>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18 & M19>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  //   M18 extends Record<string, any>,
-  //   M19 extends Record<string, any>,
-  //   M20 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   middleware1: Middleware<P, InitialValidationDef<P>, {}, M1>,
-  //   middleware2: Middleware<P, InitialValidationDef<P>, M1, M2>,
-  //   middleware3: Middleware<P, InitialValidationDef<P>, M1 & M2, M3>,
-  //   middleware4: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   middleware18: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17, M18>,
-  //   middleware19: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18, M19>,
-  //   middleware20: Middleware<P, InitialValidationDef<P>, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18 & M19, M20>,
-  //   handler: (c: Flatten<Context<P, InitialValidationDef<P>> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18 & M19 & M20>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: InitialValidationDef<P> & { path: P; response: R } }>>;
-
-
+    middleware2: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1]>, M2>,
+    middleware3: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2]>, M3>,
+    middleware4: Middleware<P, InitialValidationDef<P>, MergeMeta<[{}, M1, M2, M3]>, M4>,
+    handler: (c: Flatten<Context<P, InitialValidationDef<P>> & MergeMeta<[{}, M1, M2, M3, M4]>>) => R
+  ): Rapid<AddRoute<Routes, P, InitialValidationDef<P>, R>>
+  
 
   // #############################################################
-  // with middleware and validation, up to 20 middleware functions
+  // with middleware and validation, up to 4 middleware functions
   // #############################################################
 
   <
     P extends string,
     R extends Awaitable<HandlerResponseTypes>,
-    S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-    M1 extends Record<string, any>
+    S extends Partial<ValidationDef<P, Schema, Schema, Schema, UrlParamSchema<P>>>,
+    M1
   >(
     path: P,
     schema: S,
     middleware: Middleware<P, S, {}, M1>,
-    handler: (c: Flatten<Context<P, S> & M1>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  <
-    P extends string,
-    R extends Awaitable<HandlerResponseTypes>,
-    S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-    M1 extends Record<string, any>,
-    M2 extends Record<string, any>
-  >(
-    path: P,
-    schema: S,
-    middleware1: Middleware<P, S, {}, M1>,
-    middleware2: Middleware<P, S, M1, M2>,
-    handler: (c: Flatten<Context<P, S> & M1 & M2>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  <
-    P extends string,
-    R extends Awaitable<HandlerResponseTypes>,
-    S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-    M1 extends Record<string, any>,
-    M2 extends Record<string, any>,
-    M3 extends Record<string, any>,
-  >(
-    path: P,
-    schema: S,
-    middleware1: Middleware<P, S, {}, M1>,
-    middleware2: Middleware<P, S, M1, M2>,
-    middleware3: Middleware<P, S, M1 & M2, M3>,
-    handler: (c: Flatten<Context<P, S> & M1 & M2 & M3>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  <
-    P extends string,
-    R extends Awaitable<HandlerResponseTypes>,
-    S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-    M1 extends Record<string, any>,
-    M2 extends Record<string, any>,
-    M3 extends Record<string, any>,
-    M4 extends Record<string, any>,
-  >(
-    path: P,
-    schema: S,
-    middleware1: Middleware<P, S, {}, M1>,
-    middleware2: Middleware<P, S, M1, M2>,
-    middleware3: Middleware<P, S, M1 & M2, M3>,
-    middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-    handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4>) => R
-  ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  //   M18 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   middleware18: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17, M18>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  //   M18 extends Record<string, any>,
-  //   M19 extends Record<string, any>,
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   middleware18: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17, M18>,
-  //   middleware19: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18, M19>,
-  //   handler: (c: Flatten<Context<P, S> & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18 & M19>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
+    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1]>>) => R
+  ): Rapid<AddRoute<Routes, P, S, R>>
 
-  // <
-  //   P extends string,
-  //   R extends Awaitable<HandlerResponseTypes>,
-  //   S extends Partial<ValidationDef<P, ZodSchema, ZodSchema, ZodSchema, UrlParamSchema<P>>>,
-  //   M1 extends Record<string, any>,
-  //   M2 extends Record<string, any>,
-  //   M3 extends Record<string, any>,
-  //   M4 extends Record<string, any>,
-  //   M5 extends Record<string, any>,
-  //   M6 extends Record<string, any>,
-  //   M7 extends Record<string, any>,
-  //   M8 extends Record<string, any>,
-  //   M9 extends Record<string, any>,
-  //   M10 extends Record<string, any>,
-  //   M11 extends Record<string, any>,
-  //   M12 extends Record<string, any>,
-  //   M13 extends Record<string, any>,
-  //   M14 extends Record<string, any>,
-  //   M15 extends Record<string, any>,
-  //   M16 extends Record<string, any>,
-  //   M17 extends Record<string, any>,
-  //   M18 extends Record<string, any>,
-  //   M19 extends Record<string, any>,
-  //   M20 extends Record<string, any>
-  // >(
-  //   path: P,
-  //   schema: S,
-  //   middleware1: Middleware<P, S, {}, M1>,
-  //   middleware2: Middleware<P, S, M1, M2>,
-  //   middleware3: Middleware<P, S, M1 & M2, M3>,
-  //   middleware4: Middleware<P, S, M1 & M2 & M3, M4>,
-  //   middleware5: Middleware<P, S, M1 & M2 & M3 & M4, M5>,
-  //   middleware6: Middleware<P, S, M1 & M2 & M3 & M4 & M5, M6>,
-  //   middleware7: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6, M7>,
-  //   middleware8: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7, M8>,
-  //   middleware9: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8, M9>,
-  //   middleware10: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9, M10>,
-  //   middleware11: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10, M11>,
-  //   middleware12: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11, M12>,
-  //   middleware13: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12, M13>,
-  //   middleware14: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13, M14>,
-  //   middleware15: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14, M15>,
-  //   middleware16: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15, M16>,
-  //   middleware17: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16, M17>,
-  //   middleware18: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17, M18>,
-  //   middleware19: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18, M19>,
-  //   middleware20: Middleware<P, S, M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18 & M19, M20>,
-  //   handler: (c: Flatten<Context<P, S & M1 & M2 & M3 & M4 & M5 & M6 & M7 & M8 & M9 & M10 & M11 & M12 & M13 & M14 & M15 & M16 & M17 & M18 & M19 & M20>>) => R
-  // ): Rapid<Flatten<Routes & { [x in P]: Flatten<S & { path: P; response: R }> }>>;
+  <
+    P extends string,
+    R extends Awaitable<HandlerResponseTypes>,
+    S extends Partial<ValidationDef<P, Schema, Schema, Schema, UrlParamSchema<P>>>,
+    M1, M2
+  >(
+    path: P,
+    schema: S,
+    middleware1: Middleware<P, S, {}, M1>,
+    middleware2: Middleware<P, S, MergeMeta<[{}, M1]>, M2>,
+    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1, M2]>>) => R
+  ): Rapid<AddRoute<Routes, P, S, R>>
+  
+  <
+    P extends string,
+    R extends Awaitable<HandlerResponseTypes>,
+    S extends Partial<ValidationDef<P, Schema, Schema, Schema, UrlParamSchema<P>>>,
+    M1, M2, M3
+  >(
+    path: P,
+    schema: S,
+    middleware1: Middleware<P, S, {}, M1>,
+    middleware2: Middleware<P, S, MergeMeta<[{}, M1]>, M2>,
+    middleware3: Middleware<P, S, MergeMeta<[{}, M1, M2]>, M3>,
+    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1, M2, M3]>>) => R
+  ): Rapid<AddRoute<Routes, P, S, R>>
+  
+  <
+    P extends string,
+    R extends Awaitable<HandlerResponseTypes>,
+    S extends Partial<ValidationDef<P, Schema, Schema, Schema, UrlParamSchema<P>>>,
+    M1, M2, M3, M4
+  >(
+    path: P,
+    schema: S,
+    middleware1: Middleware<P, S, {}, M1>,
+    middleware2: Middleware<P, S, MergeMeta<[{}, M1]>, M2>,
+    middleware3: Middleware<P, S, MergeMeta<[{}, M1, M2]>, M3>,
+    middleware4: Middleware<P, S, MergeMeta<[{}, M1, M2, M3]>, M4>,
+    handler: (c: Flatten<Context<P, S> & MergeMeta<[{}, M1, M2, M3, M4]>>) => R
+  ): Rapid<AddRoute<Routes, P, S, R>>
 }
+
+type AddRoute<Routes extends AnyRoutes, P extends string, S, R> = Flatten<
+  Routes & { [x in P]: Flatten<S & { path: P, output: R }> }
+>
